@@ -1,0 +1,58 @@
+name: Build Tweak
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  build:
+    name: Compile for arm64 & arm64e
+    runs-on: macos-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set up Theos
+      run: |
+        # Install Homebrew if missing
+        if ! command -v brew &> /dev/null; then
+          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          # Ensure brew is in PATH for subsequent steps
+          echo "/opt/homebrew/bin" >> $GITHUB_PATH
+        fi
+        brew install ldid
+        # Clone Theos
+        git clone --recursive https://github.com/theos/theos.git "$HOME/theos"
+
+        # Export persistent env vars
+        echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+        echo "$HOME/theos/bin" >> $GITHUB_PATH  # 更安全的 PATH 添加方式
+
+    - name: Install iOS SDKs
+      run: |
+        mkdir -p "$THEOS/sdks"
+        curl -fsSL -o /tmp/iPhoneOS17.3.1.sdk.zip \
+          https://github.com/xybp888/iOS-SDKs/releases/download/iOS17.3.1-SDKs/iPhoneOS17.3.1.sdk.zip
+        unzip /tmp/iPhoneOS17.3.1.sdk.zip -d "$THEOS/sdks/"
+        rm /tmp/iPhoneOS17.3.1.sdk.zip
+
+        # Confirm extraction
+        echo "Extracted SDKs:"
+        ls -R "$THEOS/sdks/"
+
+    - name: Build the Tweak (dylib only)
+      run: |
+        echo "Building with THEOS=$THEOS"
+        echo "Available SDKs:"
+        ls -la "$THEOS/sdks"
+        make  
+    - name: Upload dylib Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: compiled-tweak-dylib
+        path: |
+          .theos/obj/**/*.dylib
+        retention-days: 7
