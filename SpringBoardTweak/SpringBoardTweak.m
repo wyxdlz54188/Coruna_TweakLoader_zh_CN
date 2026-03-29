@@ -1,6 +1,7 @@
-// SpringBoardTweak.m - 本地文件选择版
+// SpringBoardTweak.m - 修复编译错误版
 @import UIKit;
 @import UniformTypeIdentifiers;
+@import Foundation;  // 添加 Foundation 框架导入
 #import "SpringBoardTweak.h"
 #include <objc/runtime.h>
 #include <objc/message.h>
@@ -678,7 +679,8 @@ static int spawnRoot(NSString *path, NSArray *args, void *stdoutPipe, void *stde
         }
         
         NSString *logPath = @"/tmp/tips_search_log.txt";
-        [logContent writeToFile:logPath atomically:YES encoding:NSUTF8Encoding error:nil];
+        // 修复：使用数值 4 代替 NSUTF8Encoding，或确保 Foundation 已导入
+        [logContent writeToFile:logPath atomically:YES encoding:4 error:nil];
         
         dispatch_async(dispatch_get_main_queue(), ^{
             UIAlertController *result = [UIAlertController alertControllerWithTitle:@"Tips 搜索完成"
@@ -1012,7 +1014,8 @@ __attribute__((constructor)) static void init() {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSString *flag = @"/tmp/.coruna_welcomed";
         if (![[NSFileManager defaultManager] fileExistsAtPath:flag]) {
-            [@"" writeToFile:flag atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            // 修复：使用数值 4 代替 NSUTF8Encoding
+            [[NSData data] writeToFile:flag options:0 error:nil];
             UIAlertController *welcome = [UIAlertController alertControllerWithTitle:@"Welcome to Coruna + TrollStore"
                 message:@"Your device has been jailbroken!\n\n"
                          "Features enabled:\n"
