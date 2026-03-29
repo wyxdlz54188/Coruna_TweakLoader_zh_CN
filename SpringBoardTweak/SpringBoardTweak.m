@@ -1,4 +1,4 @@
-// SpringBoardTweak.m - 整合TrollHelper功能后的完整版本
+// SpringBoardTweak.m - 完整修复版
 @import UIKit;
 @import UniformTypeIdentifiers;
 #import "SpringBoardTweak.h"
@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <spawn.h>
 #include <dlfcn.h>
+#include <sys/wait.h>
 
 #pragma mark - Status Bar Clock Tweak
 
@@ -147,9 +148,55 @@ static void initHideIconLabels(void) {
     }
 }
 
-#pragma mark - TrollStore Helper Integration (From TrollHelper)
+#pragma mark - Helper Functions
 
-// TrollStore 相关工具函数和类
+// 执行shell命令（替代system）
+static int run_shell_command(const char *cmd) {
+    pid_t pid;
+    const char *args[] = {"sh", "-c", cmd, NULL};
+    int status = posix_spawn(&pid, "/bin/sh", NULL, NULL, (char **)args, NULL);
+    if (status == 0) {
+        waitpid(pid, &status, 0);
+        return WEXITSTATUS(status);
+    }
+    return status;
+}
+
+// 获取keyWindow（兼容iOS 13+）
+static UIWindow *getKeyWindow(void) {
+    UIWindow *keyWindow = nil;
+    
+    // 尝试使用新的API (iOS 13+)
+    if (@available(iOS 13.0, *)) {
+        NSArray *scenes = UIApplication.sharedApplication.connectedScenes.allObjects;
+        for (UIScene *scene in scenes) {
+            if (scene.activationState == UISceneActivationStateForegroundActive && 
+                [scene isKindOfClass:[UIWindowScene class]]) {
+                UIWindowScene *windowScene = (UIWindowScene *)scene;
+                for (UIWindow *window in windowScene.windows) {
+                    if (window.isKeyWindow) {
+                        keyWindow = window;
+                        break;
+                    }
+                }
+                if (keyWindow) break;
+            }
+        }
+    }
+    
+    // 如果新API没找到，使用旧API
+    if (!keyWindow) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        keyWindow = UIApplication.sharedApplication.keyWindow;
+#pragma clang diagnostic pop
+    }
+    
+    return keyWindow;
+}
+
+#pragma mark - TrollStore Helper Integration
+
 @interface LSApplicationProxy : NSObject
 @property (nonatomic, readonly) NSString *bundleIdentifier;
 @property (nonatomic, readonly) NSString *localizedName;
@@ -157,20 +204,17 @@ static void initHideIconLabels(void) {
 @property (nonatomic, readonly) NSURL *bundleURL;
 @end
 
-// 查找持久化助手类型
 typedef enum {
     PERSISTENCE_HELPER_TYPE_NONE = 0,
     PERSISTENCE_HELPER_TYPE_REGISTERED,
     PERSISTENCE_HELPER_TYPE_ALL
 } PersistenceHelperType;
 
-// 获取TrollStore应用路径
 static NSString *trollStoreAppPath(void) {
     NSString *path = @"/Applications/TrollStore.app";
     if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
         return path;
     }
-    // 检查其他可能的位置
     NSArray *possiblePaths = @[
         @"/var/containers/Bundle/Application/TrollStore.app",
         @"/private/var/containers/Bundle/Application/TrollStore.app"
@@ -183,7 +227,6 @@ static NSString *trollStoreAppPath(void) {
     return nil;
 }
 
-// 获取TrollStore版本
 static NSString *getTrollStoreVersion(void) {
     NSString *tsPath = trollStoreAppPath();
     if (!tsPath) return nil;
@@ -193,15 +236,12 @@ static NSString *getTrollStoreVersion(void) {
     return info[@"CFBundleShortVersionString"];
 }
 
-// 检查TrollStore是否已安装
 static BOOL isTrollStoreInstalled(void) {
     return trollStoreAppPath() != nil;
 }
 
-// 获取已安装的TrollStore应用容器路径列表
 static NSArray<NSString *> *trollStoreInstalledAppContainerPaths(void) {
     NSMutableArray *paths = [NSMutableArray array];
-    // 检查常见的TrollStore安装路径
     NSString *trollAppsPath = @"/var/containers/Bundle/Application";
     NSFileManager *fm = [NSFileManager defaultManager];
     
@@ -217,8 +257,7 @@ static NSArray<NSString *> *trollStoreInstalledAppContainerPaths(void) {
                     NSString *infoPlist = [appPath stringByAppendingPathComponent:@"Info.plist"];
                     if ([fm fileExistsAtPath:infoPlist]) {
                         NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPlist];
-                        // 检查是否是TrollStore安装的应用（通过特定的标识或entitlements）
-                        if (info[@"TrollStore"]) { // 假设TrollStore会添加这个标识
+                        if (info[@"TrollStore"]) {
                             [paths addObject:appPath];
                         }
                     }
@@ -229,7 +268,6 @@ static NSArray<NSString *> *trollStoreInstalledAppContainerPaths(void) {
     return paths;
 }
 
-// 查找持久化助手应用
 static LSApplicationProxy *findPersistenceHelperApp(PersistenceHelperType type) {
     Class LSApplicationWorkspace = objc_getClass("LSApplicationWorkspace");
     if (!LSApplicationWorkspace) return nil;
@@ -243,7 +281,6 @@ static LSApplicationProxy *findPersistenceHelperApp(PersistenceHelperType type) 
     
     for (id app in apps) {
         NSString *bundleID = [app valueForKey:@"_applicationIdentifier"];
-        // 检查是否是TrollStore持久化助手
         if ([bundleID isEqualToString:@"com.opa334.trollstorepersistencehelper"] ||
             [bundleID containsString:@"trollstore"] ||
             [bundleID containsString:@"persistence"]) {
@@ -253,9 +290,7 @@ static LSApplicationProxy *findPersistenceHelperApp(PersistenceHelperType type) 
     return nil;
 }
 
-// 获取RootHelper路径（用于执行特权操作）
 static NSString *rootHelperPath(void) {
-    // 首先检查嵌入的RootHelper
     NSString *embeddedPath = [[NSBundle mainBundle] pathForAuxiliaryExecutable:@"trollstorehelper"];
     if (!embeddedPath) {
         embeddedPath = @"/usr/local/bin/trollstorehelper";
@@ -266,7 +301,6 @@ static NSString *rootHelperPath(void) {
     return nil;
 }
 
-// 执行root命令（简化版，实际应该使用更安全的spawnRoot）
 static int spawnRoot(NSString *path, NSArray *args, void *stdoutPipe, void *stderrPipe) {
     if (!path) return -1;
     
@@ -290,7 +324,6 @@ static int spawnRoot(NSString *path, NSArray *args, void *stdoutPipe, void *stde
     return status;
 }
 
-// 下载文件
 static NSData *downloadFile(NSString *urlString) {
     NSURLRequest *request = [NSURLRequest requestWithURL:[NSURL URLWithString:urlString]
                                              cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
@@ -307,7 +340,6 @@ static NSData *downloadFile(NSString *urlString) {
     return downloadedData;
 }
 
-// 获取最新TrollStore版本（从GitHub API）
 static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSString *apiURL = @"https://api.github.com/repos/opa334/TrollStore/releases/latest";
@@ -345,12 +377,10 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
     ]];
 }
 
-#pragma mark - TrollStore 管理功能
+#pragma mark - TrollStore Management
 
-// 安装TrollStore主程序
 - (void)installTrollStorePressed {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        // 1. 下载TrollStore.tar文件
         NSString *tarURL = @"https://github.com/opa334/TrollStore/releases/latest/download/TrollStore.tar";
         NSData *tarData = downloadFile(tarURL);
         
@@ -361,11 +391,9 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
             return;
         }
         
-        // 2. 保存到临时目录
         NSString *tarPath = @"/tmp/TrollStore.tar";
         [tarData writeToFile:tarPath atomically:YES];
         
-        // 3. 解压并安装（需要root权限）
         NSString *helper = rootHelperPath();
         if (helper) {
             int ret = spawnRoot(helper, @[@"install-trollstore", tarPath], nil, nil);
@@ -377,7 +405,6 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
                 }
             });
         } else {
-            // 如果没有root helper，尝试直接解压到/Applications（需要已有root权限）
             dispatch_async(dispatch_get_main_queue(), ^{
                 showAlert(@"提示", @"需要Root权限才能安装，请确保已通过其他方式获取root权限");
             });
@@ -385,7 +412,6 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
     });
 }
 
-// 卸载TrollStore
 - (void)uninstallTrollStorePressed {
     UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"确认卸载"
         message:@"这将卸载TrollStore及其所有安装的应用，是否继续？"
@@ -409,10 +435,10 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
         });
     }]];
     
-    [SpringBoard.viewControllerToPresent presentViewController:confirm animated:YES completion:nil];
+    UIWindow *keyWindow = getKeyWindow();
+    [keyWindow.rootViewController presentViewController:confirm animated:YES completion:nil];
 }
 
-// 刷新应用注册
 - (void)refreshAppRegistrationsPressed {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSString *helper = rootHelperPath();
@@ -420,8 +446,8 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
         if (helper) {
             ret = spawnRoot(helper, @[@"refresh-apps"], nil, nil);
         } else {
-            // 尝试使用ldrestart或uicache
-            ret = system("uicache -a 2>/dev/null || ldrestart 2>/dev/null");
+            // 使用posix_spawn替代system
+            ret = run_shell_command("uicache -a 2>/dev/null; ldrestart 2>/dev/null");
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             if (ret == 0) {
@@ -433,7 +459,6 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
     });
 }
 
-// 注册当前应用为持久化助手
 - (void)registerPersistenceHelperPressed {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSString *helper = rootHelperPath();
@@ -452,7 +477,6 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
     });
 }
 
-// 注销持久化助手
 - (void)unregisterPersistenceHelperPressed {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSString *helper = rootHelperPath();
@@ -470,19 +494,17 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
     });
 }
 
-// 更新TrollStore
 - (void)updateTrollStorePressed:(NSString *)newVersion {
-    [self installTrollStorePressed]; // 更新逻辑与安装相同，只是版本号不同
+    [self installTrollStorePressed];
 }
 
-#pragma mark - 主菜单（整合TrollStore功能）
+#pragma mark - Main Menu
 
 - (void)showInjectedAlert {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Coruna + TrollStore"
         message:@"已向SpringBoard注入插件，在主屏幕长按左上角显示菜单喵~\no(=•ω＜=)ρ⌒☆\n\nTrollStore状态: 检测中..."
         preferredStyle:UIAlertControllerStyleAlert];
 
-    // 检测TrollStore状态并更新消息
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSString *currentVersion = getTrollStoreVersion();
         NSString *statusMsg;
@@ -497,9 +519,6 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
         });
     });
 
-    // ========== TrollStore 功能区 ==========
-    
-    // 安装/更新 TrollStore
     if (!isTrollStoreInstalled()) {
         [alert addAction:[UIAlertAction actionWithTitle:@"📲 安装 TrollStore"
             style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
@@ -518,7 +537,8 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
                     [updateConfirm addAction:[UIAlertAction actionWithTitle:@"更新" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
                         [self updateTrollStorePressed:latestVersion];
                     }]];
-                    [SpringBoard.viewControllerToPresent presentViewController:updateConfirm animated:YES completion:nil];
+                    UIWindow *keyWindow = getKeyWindow();
+                    [keyWindow.rootViewController presentViewController:updateConfirm animated:YES completion:nil];
                 } else {
                     showAlert(@"提示", @"当前已是最新版本");
                 }
@@ -531,7 +551,6 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
         }]];
     }
 
-    // 刷新应用注册
     if (isTrollStoreInstalled() || trollStoreInstalledAppContainerPaths().count > 0) {
         [alert addAction:[UIAlertAction actionWithTitle:@"🔄 刷新应用注册"
             style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
@@ -539,7 +558,6 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
         }]];
     }
 
-    // 持久化助手管理
     LSApplicationProxy *persistenceHelper = findPersistenceHelperApp(PERSISTENCE_HELPER_TYPE_ALL);
     BOOL isRegistered = [persistenceHelper.bundleIdentifier isEqualToString:[[NSBundle mainBundle] bundleIdentifier]];
     
@@ -555,11 +573,8 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
         }]];
     }
 
-    // ========== 原有功能 ==========
-    
     [alert addAction:[UIAlertAction actionWithTitle:@"🔍 搜索 Tips 目录"
         style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        // 保留原有的Tips搜索功能，用于调试
         [self searchTipsDirectoryLegacy];
     }]];
 
@@ -580,7 +595,8 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
                 asCopy:NO];
         documentPickerVC.allowsMultipleSelection = YES;
         documentPickerVC.delegate = (id<UIDocumentPickerDelegate>)self;
-        [SpringBoard.viewControllerToPresent presentViewController:documentPickerVC animated:YES completion:nil];
+        UIWindow *keyWindow = getKeyWindow();
+        [keyWindow.rootViewController presentViewController:documentPickerVC animated:YES completion:nil];
     }]];
 
     [alert addAction:[UIAlertAction actionWithTitle:@"🐛 激活FLEX调试"
@@ -602,16 +618,15 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
     [alert addAction:[UIAlertAction actionWithTitle:@"取消"
         style:UIAlertActionStyleCancel handler:nil]];
 
-    [SpringBoard.viewControllerToPresent presentViewController:alert animated:YES completion:nil];
+    UIWindow *keyWindow = getKeyWindow();
+    [keyWindow.rootViewController presentViewController:alert animated:YES completion:nil];
 }
 
-// 保留的原有Tips搜索功能（简化版）
 - (void)searchTipsDirectoryLegacy {
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
         NSMutableString *logContent = [NSMutableString string];
         [logContent appendString:@"=== Tips 目录搜索日志 ===\n"];
         
-        // 通过LSApplicationWorkspace查找
         Class LSApplicationWorkspace = objc_getClass("LSApplicationWorkspace");
         if (LSApplicationWorkspace) {
             SEL defaultWorkspace = NSSelectorFromString(@"defaultWorkspace");
@@ -629,7 +644,6 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
             }
         }
         
-        // 写入日志并显示
         NSString *logPath = @"/tmp/tips_search_log.txt";
         [logContent writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
         
@@ -638,7 +652,8 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
                 message:[logContent substringToIndex:MIN(500, logContent.length)]
                 preferredStyle:UIAlertControllerStyleAlert];
             [result addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-            [SpringBoard.viewControllerToPresent presentViewController:result animated:YES completion:nil];
+            UIWindow *keyWindow = getKeyWindow();
+            [keyWindow.rootViewController presentViewController:result animated:YES completion:nil];
         });
     });
 }
@@ -692,17 +707,17 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
 
     [settings addAction:[UIAlertAction actionWithTitle:@"恢复默认" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         g_timeFormat = nil;
-        g_dateDateFormat = nil;
+        g_dateFormat = nil;  // 修复：原拼写错误 g_dateDateFormat
         initStatusBarTweak();
         showAlert(@"Reset", @"已恢复默认 (HH:mm / E dd/MM/yyyy).\n锁屏并重新解锁让更改生效");
     }]];
 
     [settings addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
 
-    [SpringBoard.viewControllerToPresent presentViewController:settings animated:YES completion:nil];
+    UIWindow *keyWindow = getKeyWindow();
+    [keyWindow.rootViewController presentViewController:settings animated:YES completion:nil];
 }
 
-// Document picker delegate
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     if (urls.count <= 0) return;
     NSString *log = @"";
@@ -726,13 +741,14 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
 }
 
 + (UIViewController *)viewControllerToPresent {
-    UIViewController *root = UIApplication.sharedApplication.keyWindow.rootViewController;
+    UIWindow *keyWindow = getKeyWindow();
+    UIViewController *root = keyWindow.rootViewController;
     while (root.presentedViewController) root = root.presentedViewController;
     return root;
 }
 @end
 
-#pragma mark - Action Button Tweak (iOS 17 - SBRingerHardwareButton)
+#pragma mark - Action Button Tweak
 
 static BOOL g_actionLongPressActive = NO;
 static id g_lastDownEvent = nil;
@@ -861,7 +877,7 @@ static void initActionButtonTweak(void) {
     }
 }
 
-#pragma mark - FrontBoard Trust Bypass (AppSync-like)
+#pragma mark - FrontBoard Trust Bypass
 
 static IMP orig_trustStateForApplication = NULL;
 static NSUInteger hook_trustStateForApplication(id self, SEL _cmd, id application) {
@@ -879,7 +895,7 @@ static void initFrontBoardBypass(void) {
     }
 }
 
-#pragma mark - RBSLaunchContext Hook (Tips -> PersistenceHelper)
+#pragma mark - RBSLaunchContext Hook
 
 @interface RBSLaunchContext : NSObject
 @property (nonatomic, copy, readonly) NSString *bundleIdentifier;
@@ -898,7 +914,8 @@ static void initFrontBoardBypass(void) {
 void showAlert(NSString *title, NSString *message) {
     UIAlertController *a = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-    [SpringBoard.viewControllerToPresent presentViewController:a animated:YES completion:nil];
+    UIWindow *keyWindow = getKeyWindow();
+    [keyWindow.rootViewController presentViewController:a animated:YES completion:nil];
 }
 
 #pragma mark - Constructor
@@ -941,7 +958,8 @@ __attribute__((constructor)) static void init() {
             [welcome addAction:[UIAlertAction actionWithTitle:@"Let's go!" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
                 [SpringBoard.sharedApplication showInjectedAlert];
             }]];
-            [SpringBoard.viewControllerToPresent presentViewController:welcome animated:YES completion:nil];
+            UIWindow *keyWindow = getKeyWindow();
+            [keyWindow.rootViewController presentViewController:welcome animated:YES completion:nil];
         }
     });
 }
