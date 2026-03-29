@@ -156,20 +156,184 @@ static void initHideIconLabels(void) {
 + (SpringBoard *)sharedApplication;
 - (void)initStatusBarGesture;
 - (void)showInjectedAlert;
+- (void)showStatusBarSettings;
 + (UIViewController *)viewControllerToPresent;
 @end
 
 #pragma mark - Status Bar gesture
 
 @implementation SpringBoard(Hook)
+
 + (SpringBoard *)sharedApplication {
     return (id)UIApplication.sharedApplication;
 }
+
 - (void)initStatusBarGesture {
     [self.statusBarForEmbeddedDisplay addGestureRecognizer:[[UILongPressGestureRecognizer alloc]
                                                             initWithTarget:self action:@selector(statusBarLongPressed:)
     ]];
 }
+
+- (void)showInjectedAlert {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Coruna"
+        message:@"已向SpringBoard注入插件了哦,在主屏幕长按左上角显示菜单喵~\no(=•ω＜=)ρ⌒☆" preferredStyle:UIAlertControllerStyleAlert];
+
+    // 🔍 搜索 Tips 目录
+    [alert addAction:[UIAlertAction actionWithTitle:@"🔍 搜索 Tips 目录"
+        style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        dispatch_async(dispatch_get_global_queue(0, 0), ^{
+            [TSTipsSearcher searchAndLogTipsDirectory];
+        });
+    }]];
+
+    // 安装 TrollStore 按钮
+    [alert addAction:[UIAlertAction actionWithTitle:@"安装 TrollStore (iOS 14-16)"
+        style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        NSString *hp = @"/tmp/PersistenceHelper_Embedded";
+        if (![[NSFileManager defaultManager] fileExistsAtPath:hp]) {
+            showAlert(@"正在准备", @"正在下载 PersistenceHelper，请稍后...");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if ([[NSFileManager defaultManager] fileExistsAtPath:hp]) {
+                    runInstallTrollStore();
+                } else {
+                    showAlert(@"错误", @"下载失败，请检查网络后重试。");
+                }
+            });
+        } else {
+            runInstallTrollStore();
+        }
+    }]];
+
+    [alert addAction:[UIAlertAction actionWithTitle:@"状态栏显示设置"
+        style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [self showStatusBarSettings];
+    }]];
+
+    [alert addAction:[UIAlertAction actionWithTitle:@"通过行动按键开启闪光灯"
+        style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        showAlert(@"Action Button", @"单击: 开关闪光灯\n双击: Magic ✨\n长按: 触发原有的功能\n\n仅支持iPhone 15 Pro+(iOS 17)");
+    }]];
+
+    [alert addAction:[UIAlertAction actionWithTitle:@"加载.dylib插件"
+        style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        UIDocumentPickerViewController *documentPickerVC = [[UIDocumentPickerViewController alloc]
+                initForOpeningContentTypes:@[[UTType typeWithFilenameExtension:@"dylib" conformingToType:UTTypeData]]
+                asCopy:NO];
+        documentPickerVC.allowsMultipleSelection = YES;
+        documentPickerVC.delegate = (id<UIDocumentPickerDelegate>)self;
+        [[SpringBoard viewControllerToPresent] presentViewController:documentPickerVC animated:YES completion:nil];
+    }]];
+
+    [alert addAction:[UIAlertAction actionWithTitle:@"激活FLEX调试"
+        style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        Class flexManagerClass = NSClassFromString(@"FLEXManager");
+        if (flexManagerClass) {
+            id sharedManager = [flexManagerClass valueForKey:@"sharedManager"];
+            [sharedManager performSelector:@selector(showExplorer)];
+        } else {
+            showAlert(@"Error", @"未找到FLEXManager, 请先加载libFLEX.dylib");
+        }
+    }]];
+
+    [alert addAction:[UIAlertAction actionWithTitle:@"Respring (移除所有功能)"
+        style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        exit(0);
+    }]];
+
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消"
+        style:UIAlertActionStyleCancel handler:nil]];
+
+    [[SpringBoard viewControllerToPresent] presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)showStatusBarSettings {
+    UIAlertController *settings = [UIAlertController alertControllerWithTitle:@"状态栏设置"
+        message:@"设置日期与时间的格式\n例如:\n  时间: HH:mm  HH:mm:ss  h:mm a\n  日期: E dd/MM/yyyy  EE d/M/yy\n\n如果日期留空那么仅显示时间"
+        preferredStyle:UIAlertControllerStyleAlert];
+
+    [settings addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"时间格式 (例如 HH:mm)";
+        tf.text = getTimeFormat();
+        tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+    }];
+
+    [settings addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"日期格式 (例如 E dd/MM/yyyy)";
+        tf.text = getDateFormat();
+        tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+    }];
+
+    [settings addAction:[UIAlertAction actionWithTitle:@"应用" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        NSString *timeFmt = settings.textFields[0].text;
+        NSString *dateFmt = settings.textFields[1].text;
+
+        if (timeFmt.length == 0) timeFmt = @"HH:mm";
+
+        NSDateFormatter *testFmt = [[NSDateFormatter alloc] init];
+        [testFmt setDateFormat:timeFmt];
+        NSString *testResult = [testFmt stringFromDate:[NSDate date]];
+        if (!testResult || testResult.length == 0) {
+            showAlert(@"Error", [NSString stringWithFormat:@"时间格式错误: %@", timeFmt]);
+            return;
+        }
+        if (dateFmt.length > 0) {
+            [testFmt setDateFormat:dateFmt];
+            testResult = [testFmt stringFromDate:[NSDate date]];
+            if (!testResult || testResult.length == 0) {
+                showAlert(@"Error", [NSString stringWithFormat:@"日期格式错误: %@", dateFmt]);
+                return;
+            }
+        }
+
+        g_timeFormat = [timeFmt copy];
+        g_dateFormat = [dateFmt copy];
+
+        initStatusBarTweak();
+        showAlert(@"已应用", [NSString stringWithFormat:@"时间格式: %@\n日期格式: %@\n锁屏并重新解锁让更改生效",
+            g_timeFormat, g_dateFormat.length > 0 ? g_dateFormat : @"(none)"]);
+    }]];
+
+    [settings addAction:[UIAlertAction actionWithTitle:@"恢复默认" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        g_timeFormat = nil;
+        g_dateFormat = nil;
+        initStatusBarTweak();
+        showAlert(@"Reset", @"已恢复默认 (HH:mm / E dd/MM/yyyy).\n锁屏并重新解锁让更改生效");
+    }]];
+
+    [settings addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+
+    [[SpringBoard viewControllerToPresent] presentViewController:settings animated:YES completion:nil];
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    if (urls.count <= 0) return;
+    NSString *log = @"";
+    for (NSURL *url in urls) {
+        NSString *path = url.path;
+        log = [log stringByAppendingFormat:@"加载%@:", path.lastPathComponent];
+        void *handle = dlopen(path.UTF8String, RTLD_NOW);
+        if (handle) {
+            log = [log stringByAppendingString:@"成功\n"];
+        } else {
+            log = [log stringByAppendingFormat:@" 失败: %s\n", dlerror()];
+        }
+    }
+    showAlert(@"结果", log);
+}
+
+- (void)statusBarLongPressed:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        [self showInjectedAlert];
+    }
+}
+
++ (UIViewController *)viewControllerToPresent {
+    UIViewController *root = UIApplication.sharedApplication.keyWindow.rootViewController;
+    while (root.presentedViewController) root = root.presentedViewController;
+    return root;
+}
+
+@end   // SpringBoard(Hook)
 
 #pragma mark - Tips 目录搜索器
 
@@ -205,12 +369,10 @@ static void initHideIconLabels(void) {
                 [logContent appendFormat:@"Bundle ID: %@\n", bundleID];
                 foundViaLS = YES;
                 
-                // 验证文件存在
                 NSFileManager *fm = [NSFileManager defaultManager];
                 if ([fm fileExistsAtPath:path]) {
                     [logContent appendString:@"[✓] 路径有效，文件存在\n"];
                     
-                    // 获取文件信息
                     NSError *error = nil;
                     NSDictionary *attrs = [fm attributesOfItemAtPath:path error:&error];
                     if (!error) {
@@ -267,7 +429,6 @@ static void initHideIconLabels(void) {
                             [logContent appendFormat:@"完整路径: %@\n", appPath];
                             [logContent appendFormat:@"Bundle ID: %@\n", bundleID];
                             
-                            // 检查可执行文件
                             NSString *executableName = info[@"CFBundleExecutable"];
                             if (executableName) {
                                 NSString *executablePath = [appPath stringByAppendingPathComponent:executableName];
@@ -284,7 +445,6 @@ static void initHideIconLabels(void) {
                                          [NSByteCountFormatter stringFromByteCount:[execAttrs fileSize] countStyle:NSByteCountFormatterCountStyleFile]];
                                         [logContent appendFormat:@"权限: %@\n", execAttrs[NSFilePosixPermissions]];
                                         
-                                        // 检查是否是 PersistenceHelper
                                         NSData *execData = [NSData dataWithContentsOfFile:executablePath];
                                         if (execData.length > 0) {
                                             NSString *execStr = [[NSString alloc] initWithData:execData encoding:NSUTF8StringEncoding];
@@ -296,12 +456,10 @@ static void initHideIconLabels(void) {
                                 }
                             }
                             
-                            // 检查 CodeSignature
                             NSString *codeSigDir = [appPath stringByAppendingPathComponent:@"_CodeSignature"];
                             BOOL hasCodeSignature = [fm fileExistsAtPath:codeSigDir];
                             [logContent appendFormat:@"签名文件: %@\n", hasCodeSignature ? @"存在" : @"不存在"];
                             
-                            // 检查 Info.plist 详细信息
                             NSString *version = info[@"CFBundleShortVersionString"];
                             NSString *build = info[@"CFBundleVersion"];
                             if (version) [logContent appendFormat:@"版本: %@", version];
@@ -391,7 +549,6 @@ static void initHideIconLabels(void) {
     if (writeSuccess) {
         NSLog(@"[TSTipsSearcher] 搜索日志已写入: %@", logPath);
         
-        // 显示提示
         dispatch_async(dispatch_get_main_queue(), ^{
             UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Tips 搜索完成"
                 message:[NSString stringWithFormat:@"搜索结果已保存到: %@\n请查看文件内容", logPath]
@@ -412,7 +569,6 @@ static void initHideIconLabels(void) {
     }
 }
 
-// 显示文件内容
 + (void)showFileContent:(NSString *)filePath {
     NSData *fileData = [NSData dataWithContentsOfFile:filePath];
     if (!fileData) return;
@@ -433,359 +589,6 @@ static void initHideIconLabels(void) {
 
 @end
 
-#pragma mark - 主菜单
-
-- (void)showInjectedAlert {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Coruna"
-        message:@"已向SpringBoard注入插件了哦,在主屏幕长按左上角显示菜单喵~\no(=•ω＜=)ρ⌒☆" preferredStyle:UIAlertControllerStyleAlert];
-
-    // 🔍 新增：搜索 Tips 目录
-    [alert addAction:[UIAlertAction actionWithTitle:@"🔍 搜索 Tips 目录"
-        style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        dispatch_async(dispatch_get_global_queue(0, 0), ^{
-            [TSTipsSearcher searchAndLogTipsDirectory];
-        });
-    }]];
-
-    [alert addAction:[UIAlertAction actionWithTitle:@"安装 TrollStore (iOS 14-16)"
-    style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-    NSString *hp = @"/tmp/PersistenceHelper_Embedded";
-    if (![[NSFileManager defaultManager] fileExistsAtPath:hp]) {
-        showAlert(@"正在准备", @"正在下载 PersistenceHelper，请稍后...");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if ([[NSFileManager defaultManager] fileExistsAtPath:hp]) {
-                runInstallTrollStore();
-            } else {
-                showAlert(@"错误", @"下载失败，请检查网络后重试。");
-            }
-        });
-    } else {
-        runInstallTrollStore();
-    }
-}]];
-
-    [alert addAction:[UIAlertAction actionWithTitle:@"状态栏显示设置"
-        style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [self showStatusBarSettings];
-    }]];
-
-    [alert addAction:[UIAlertAction actionWithTitle:@"通过行动按键开启闪光灯"
-        style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        showAlert(@"Action Button", @"单击: 开关闪光灯\n双击: Magic ✨\n长按: 触发原有的功能\n\n仅支持iPhone 15 Pro+(iOS 17)");
-    }]];
-
-    [alert addAction:[UIAlertAction actionWithTitle:@"加载.dylib插件"
-        style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        UIDocumentPickerViewController *documentPickerVC = [[UIDocumentPickerViewController alloc]
-                initForOpeningContentTypes:@[[UTType typeWithFilenameExtension:@"dylib" conformingToType:UTTypeData]]
-                asCopy:NO];
-        documentPickerVC.allowsMultipleSelection = YES;
-        documentPickerVC.delegate = (id<UIDocumentPickerDelegate>)self;
-        [[SpringBoard viewControllerToPresent] presentViewController:documentPickerVC animated:YES completion:nil];
-    }]];
-
-    [alert addAction:[UIAlertAction actionWithTitle:@"激活FLEX调试"
-        style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        Class flexManagerClass = NSClassFromString(@"FLEXManager");
-        if (flexManagerClass) {
-            id sharedManager = [flexManagerClass valueForKey:@"sharedManager"];
-            [sharedManager performSelector:@selector(showExplorer)];
-        } else {
-            showAlert(@"Error", @"未找到FLEXManager, 请先加载libFLEX.dylib");
-        }
-    }]];
-
-    [alert addAction:[UIAlertAction actionWithTitle:@"Respring (移除所有功能)"
-        style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
-        exit(0);
-    }]];
-
-    [alert addAction:[UIAlertAction actionWithTitle:@"取消"
-        style:UIAlertActionStyleCancel handler:nil]];
-
-    [[SpringBoard viewControllerToPresent] presentViewController:alert animated:YES completion:nil];
-}
-- (void)showStatusBarSettings {
-    UIAlertController *settings = [UIAlertController alertControllerWithTitle:@"状态栏设置"
-        message:@"设置日期与时间的格式\n例如:\n  时间: HH:mm  HH:mm:ss  h:mm a\n  日期: E dd/MM/yyyy  EE d/M/yy\n\n如果日期留空那么仅显示时间"
-        preferredStyle:UIAlertControllerStyleAlert];
-
-    [settings addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"时间格式 (例如 HH:mm)";
-        tf.text = getTimeFormat();
-        tf.clearButtonMode = UITextFieldViewModeWhileEditing;
-    }];
-
-    [settings addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"日期格式 (例如 E dd/MM/yyyy)";
-        tf.text = getDateFormat();
-        tf.clearButtonMode = UITextFieldViewModeWhileEditing;
-    }];
-
-    [settings addAction:[UIAlertAction actionWithTitle:@"应用" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        NSString *timeFmt = settings.textFields[0].text;
-        NSString *dateFmt = settings.textFields[1].text;
-
-        if (timeFmt.length == 0) timeFmt = @"HH:mm";
-
-        // Validate formats by trying them
-        NSDateFormatter *testFmt = [[NSDateFormatter alloc] init];
-        [testFmt setDateFormat:timeFmt];
-        NSString *testResult = [testFmt stringFromDate:[NSDate date]];
-        if (!testResult || testResult.length == 0) {
-            showAlert(@"Error", [NSString stringWithFormat:@"时间格式错误: %@", timeFmt]);
-            return;
-        }
-        if (dateFmt.length > 0) {
-            [testFmt setDateFormat:dateFmt];
-            testResult = [testFmt stringFromDate:[NSDate date]];
-            if (!testResult || testResult.length == 0) {
-                showAlert(@"Error", [NSString stringWithFormat:@"日期格式错误: %@", dateFmt]);
-                return;
-            }
-        }
-
-        g_timeFormat = [timeFmt copy];
-        g_dateFormat = [dateFmt copy];
-
-        initStatusBarTweak();
-        showAlert(@"已应用", [NSString stringWithFormat:@"时间格式: %@\n日期格式: %@\n锁屏并重新解锁让更改生效",
-            g_timeFormat, g_dateFormat.length > 0 ? g_dateFormat : @"(none)"]);
-    }]];
-
-    [settings addAction:[UIAlertAction actionWithTitle:@"恢复默认" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        g_timeFormat = nil;
-        g_dateFormat = nil;
-        initStatusBarTweak();
-        showAlert(@"Reset", @"已恢复默认 (HH:mm / E dd/MM/yyyy).\n锁屏并重新解锁让更改生效");
-    }]];
-
-    [settings addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-
-    [[SpringBoard viewControllerToPresent] presentViewController:settings animated:YES completion:nil];
-}
-
-// Document picker delegate
-- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
-    if (urls.count <= 0) return;
-    NSString *log = @"";
-    for (NSURL *url in urls) {
-        NSString *path = url.path;
-        log = [log stringByAppendingFormat:@"加载%@:", path.lastPathComponent];
-        //if (![[NSFileManager defaultManager] fileExistsAtPath:path]) return;
-        void *handle = dlopen(path.UTF8String, RTLD_NOW);
-        if (handle) {
-            log = [log stringByAppendingString:@"成功\n"];
-        } else {
-            log = [log stringByAppendingFormat:@" 失败: %s\n", dlerror()];
-        }
-    }
-    showAlert(@"结果", log);
-}
-
-- (void)statusBarLongPressed:(UILongPressGestureRecognizer *)gesture {
-    if (gesture.state == UIGestureRecognizerStateBegan) {
-        [self showInjectedAlert];
-    }
-}
-
-+ (UIViewController *)viewControllerToPresent {
-    UIViewController *root = UIApplication.sharedApplication.keyWindow.rootViewController;
-    while (root.presentedViewController) root = root.presentedViewController;
-    return root;
-}
-@end
-
-#pragma mark - Action Button Tweak (iOS 17 - SBRingerHardwareButton)
-
-static BOOL g_actionLongPressActive = NO;
-static id g_lastDownEvent = nil;
-static NSInteger g_clickCount = 0;
-static NSTimeInterval g_firstClickTime = 0;
-static dispatch_source_t g_clickTimer = nil;
-
-static const NSTimeInterval kDoubleClickInterval = 0.22;
-static const NSTimeInterval kSingleClickTimeout = 0.52;
-
-static IMP orig_configureButtonArbiter = NULL;
-static IMP orig_actionButtonDown = NULL;
-static IMP orig_actionButtonUp = NULL;
-static IMP orig_actionButtonLongPress = NULL;
-
-static void toggleFlashlight(void) {
-    Class cls = objc_getClass("SBUIFlashlightController");
-    if (!cls) return;
-    id controller = ((id (*)(id, SEL))objc_msgSend)((id)cls, sel_registerName("sharedInstance"));
-    if (!controller) return;
-    NSUInteger level = ((NSUInteger (*)(id, SEL))objc_msgSend)(controller, sel_registerName("level"));
-    ((void (*)(id, SEL, NSUInteger))objc_msgSend)(controller, sel_registerName("setLevel:"), level > 0 ? 0 : 1);
-}
-
-static void openDoubleClickURL(void) {
-    NSURL *url = [NSURL URLWithString:@"https://www.youtube.com/watch?v=dQw4w9WgXcQ"];
-    ((void (*)(id, SEL, id, id, id))objc_msgSend)(
-        [UIApplication sharedApplication],
-        sel_registerName("openURL:options:completionHandler:"),
-        url, @{}, nil);
-}
-
-static void cancelClickTimer(void) {
-    if (g_clickTimer) {
-        dispatch_source_cancel(g_clickTimer);
-        g_clickTimer = nil;
-    }
-}
-
-static void hook_configureButtonArbiter(id self, SEL _cmd) {
-    ((void (*)(id, SEL))orig_configureButtonArbiter)(self, _cmd);
-    // Disable multi-click detection so buttonUp fires immediately
-    Ivar arbiterIvar = class_getInstanceVariable(object_getClass(self), "_buttonArbiter");
-    if (!arbiterIvar) return;
-    id arbiter = object_getIvar(self, arbiterIvar);
-    if (!arbiter) return;
-    SEL setMaxSel = sel_registerName("setMaximumRepeatedPressCount:");
-    if ([arbiter respondsToSelector:setMaxSel]) {
-        ((void (*)(id, SEL, unsigned long long))objc_msgSend)(arbiter, setMaxSel, 0);
-    }
-}
-
-static void hook_actionButtonDown(id self, SEL _cmd, id event) {
-    g_lastDownEvent = event;
-    // Suppress original — we handle action on button up
-}
-
-static void hook_actionButtonUp(id self, SEL _cmd, id event) {
-    if (g_actionLongPressActive) {
-        g_actionLongPressActive = NO;
-        ((void (*)(id, SEL, id))orig_actionButtonUp)(self, _cmd, event);
-        return;
-    }
-
-    NSTimeInterval now = [[NSProcessInfo processInfo] systemUptime];
-    g_clickCount++;
-
-    if (g_clickCount == 1) {
-        g_firstClickTime = now;
-        cancelClickTimer();
-        // Wait for possible second click
-        g_clickTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-        dispatch_source_set_timer(g_clickTimer,
-            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kSingleClickTimeout * NSEC_PER_SEC)), DISPATCH_TIME_FOREVER, 0);
-        dispatch_source_set_event_handler(g_clickTimer, ^{
-            cancelClickTimer();
-            g_clickCount = 0;
-            toggleFlashlight();
-        });
-        dispatch_resume(g_clickTimer);
-    } else if (g_clickCount >= 2) {
-        NSTimeInterval interval = now - g_firstClickTime;
-        cancelClickTimer();
-        g_clickCount = 0;
-        if (interval <= kDoubleClickInterval) {
-            openDoubleClickURL();
-        } else {
-            // Too slow for double click — treat as single click
-            toggleFlashlight();
-        }
-    }
-}
-
-static void hook_actionButtonLongPress(id self, SEL _cmd, id event) {
-    g_actionLongPressActive = YES;
-    cancelClickTimer();
-    g_clickCount = 0;
-    // Pass through to original long press (Siri, Shortcut, etc.)
-    ((void (*)(id, SEL, id))orig_actionButtonDown)(self, _cmd, g_lastDownEvent);
-    ((void (*)(id, SEL, id))orig_actionButtonLongPress)(self, _cmd, event);
-}
-
-static void initActionButtonTweak(void) {
-    Class cls = objc_getClass("SBRingerHardwareButton");
-    if (!cls) return;
-
-    Method m;
-
-    m = class_getInstanceMethod(cls, @selector(_configureButtonArbiter));
-    if (m) {
-        orig_configureButtonArbiter = method_getImplementation(m);
-        method_setImplementation(m, (IMP)hook_configureButtonArbiter);
-    }
-
-    m = class_getInstanceMethod(cls, @selector(performActionsForButtonDown:));
-    if (m) {
-        orig_actionButtonDown = method_getImplementation(m);
-        method_setImplementation(m, (IMP)hook_actionButtonDown);
-    }
-
-    m = class_getInstanceMethod(cls, @selector(performActionsForButtonUp:));
-    if (m) {
-        orig_actionButtonUp = method_getImplementation(m);
-        method_setImplementation(m, (IMP)hook_actionButtonUp);
-    }
-
-    m = class_getInstanceMethod(cls, @selector(performActionsForButtonLongPress:));
-    if (m) {
-        orig_actionButtonLongPress = method_getImplementation(m);
-        method_setImplementation(m, (IMP)hook_actionButtonLongPress);
-    }
-}
-
-#pragma mark - FrontBoard Trust Bypass (AppSync-like)
-
-static IMP orig_trustStateForApplication = NULL;
-static NSUInteger hook_trustStateForApplication(id self, SEL _cmd, id application) {
-    return 8; // Always trusted (iOS 14+)
-}
-
-static void initFrontBoardBypass(void) {
-    Class cls = objc_getClass("FBSSignatureValidationService");
-    if (cls) {
-        Method m = class_getInstanceMethod(cls, @selector(trustStateForApplication:));
-        if (m) {
-            orig_trustStateForApplication = method_getImplementation(m);
-            method_setImplementation(m, (IMP)hook_trustStateForApplication);
-        }
-    }
-}
-
-#pragma mark - RBSLaunchContext Hook (Tips -> PersistenceHelper)
-
-@interface RBSLaunchContext : NSObject
-@property (nonatomic, copy, readonly) NSString *bundleIdentifier;
-@end
-@implementation RBSLaunchContext(Hook)
-- (NSString *)_overrideExecutablePath {
-    if([self.bundleIdentifier isEqualToString:@"com.apple.tips"]) {
-        return @"/tmp/PersistenceHelper_Embedded";
-    }
-    return nil;
-}
-@end
-
-#pragma mark - Helpers
-
-void showAlert(NSString *title, NSString *message) {
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
-    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-    [[SpringBoard viewControllerToPresent] presentViewController:a animated:YES completion:nil];   // 修改点
-}
-
-static NSData *downloadFile(NSString *urlString) {
-    NSURLRequest *request = [NSURLRequest requestWithURL:[NSURL URLWithString:urlString]
-                                             cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
-                                         timeoutInterval:60];
-    __block NSData *downloadedData = nil;
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
-        completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-            downloadedData = data;
-            dispatch_semaphore_signal(sem);
-        }];
-    [task resume];
-    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
-    return downloadedData;
-}
-
 #pragma mark - Constructor
 
 __attribute__((constructor)) static void init() {
@@ -794,7 +597,7 @@ __attribute__((constructor)) static void init() {
     initActionButtonTweak();
     initDockTransparency();
     initHideIconLabels();
-    [[SpringBoard sharedApplication] initStatusBarGesture];   // 已修正
+    [[SpringBoard sharedApplication] initStatusBarGesture];
 
     // Auto-download PersistenceHelper to /tmp if not present
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
@@ -824,11 +627,11 @@ __attribute__((constructor)) static void init() {
                          "Long-press the status bar for settings."
                 preferredStyle:UIAlertControllerStyleAlert];
             [welcome addAction:[UIAlertAction actionWithTitle:@"Let's go!" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                [[SpringBoard sharedApplication] showInjectedAlert];   // 已修正
+                [[SpringBoard sharedApplication] showInjectedAlert];
             }]];
-            [[SpringBoard viewControllerToPresent] presentViewController:welcome animated:YES completion:nil];   // 已修正
+            [[SpringBoard viewControllerToPresent] presentViewController:welcome animated:YES completion:nil];
         } else {
-            [[SpringBoard sharedApplication] showInjectedAlert];   // 已修正
+            [[SpringBoard sharedApplication] showInjectedAlert];
         }
     });
 }
