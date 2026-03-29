@@ -1,4 +1,4 @@
-// SpringBoardTweak.m - 完整修复版
+// SpringBoardTweak.m - 本地文件选择版
 @import UIKit;
 @import UniformTypeIdentifiers;
 #import "SpringBoardTweak.h"
@@ -324,47 +324,6 @@ static int spawnRoot(NSString *path, NSArray *args, void *stdoutPipe, void *stde
     return status;
 }
 
-static NSData *downloadFile(NSString *urlString) {
-    NSURLRequest *request = [NSURLRequest requestWithURL:[NSURL URLWithString:urlString]
-                                             cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
-                                         timeoutInterval:60];
-    __block NSData *downloadedData = nil;
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
-        completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-            downloadedData = data;
-            dispatch_semaphore_signal(sem);
-        }];
-    [task resume];
-    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
-    return downloadedData;
-}
-
-static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        NSString *apiURL = @"https://api.github.com/repos/opa334/TrollStore/releases/latest";
-        NSURLRequest *request = [NSURLRequest requestWithURL:[NSURL URLWithString:apiURL]
-                                                 cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
-                                             timeoutInterval:30];
-        
-        NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
-            completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-            NSString *version = nil;
-            if (data && !error) {
-                NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                NSString *tagName = json[@"tag_name"];
-                if (tagName) {
-                    version = [tagName stringByReplacingOccurrencesOfString:@"v" withString:@""];
-                }
-            }
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completion(version);
-            });
-        }];
-        [task resume];
-    });
-}
-
 #pragma mark - Status Bar gesture
 
 @implementation SpringBoard(Hook)
@@ -377,44 +336,109 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
     ]];
 }
 
-#pragma mark - TrollStore Management
+#pragma mark - File Selection Helpers
 
-- (void)installTrollStorePressed {
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        NSString *tarURL = @"https://github.com/opa334/TrollStore/releases/latest/download/TrollStore.tar";
-        NSData *tarData = downloadFile(tarURL);
+// 显示文件选择器选择指定类型文件
+- (void)showFilePickerForType:(NSString *)fileExtension 
+                    message:(NSString *)message 
+               completion:(void (^)(NSString *filePath))completion {
+    
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"需要文件"
+        message:message
+        preferredStyle:UIAlertControllerStyleAlert];
+    
+    [alert addAction:[UIAlertAction actionWithTitle:@"选择文件" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        // 创建文档选择器
+        UTType *contentType = [UTType typeWithFilenameExtension:fileExtension conformingToType:UTTypeData];
+        UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] 
+            initForOpeningContentTypes:@[contentType] 
+            asCopy:YES]; // 复制到沙盒，避免权限问题
         
-        if (!tarData || tarData.length == 0) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                showAlert(@"错误", @"下载TrollStore失败，请检查网络连接");
-            });
+        picker.allowsMultipleSelection = NO;
+        
+        // 使用关联对象存储回调
+        objc_setAssociatedObject(picker, "completionBlock", completion, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        objc_setAssociatedObject(picker, "fileExtension", fileExtension, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        
+        picker.delegate = (id<UIDocumentPickerDelegate>)self;
+        
+        UIWindow *keyWindow = getKeyWindow();
+        [keyWindow.rootViewController presentViewController:picker animated:YES completion:nil];
+    }]];
+    
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    
+    UIWindow *keyWindow = getKeyWindow();
+    [keyWindow.rootViewController presentViewController:alert animated:YES completion:nil];
+}
+
+#pragma mark - TrollStore Installation with File Selection
+
+// 安装 TrollStore - 改为本地文件选择
+- (void)installTrollStorePressed {
+    [self showFilePickerForType:@"tar"
+        message:@"请选择 TrollStore.tar 文件\n\n请先从 GitHub 下载 TrollStore.tar 到文件 App，然后在此处选择"
+        completion:^(NSString *tarPath) {
+        if (!tarPath) {
+            showAlert(@"取消", @"未选择文件，安装已取消");
             return;
         }
         
-        NSString *tarPath = @"/tmp/TrollStore.tar";
-        [tarData writeToFile:tarPath atomically:YES];
-        
-        NSString *helper = rootHelperPath();
-        if (helper) {
-            int ret = spawnRoot(helper, @[@"install-trollstore", tarPath], nil, nil);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (ret == 0) {
-                    showAlert(@"成功", @"TrollStore已安装，请重启设备");
-                } else {
-                    showAlert(@"错误", [NSString stringWithFormat:@"安装失败，错误码: %d", ret]);
-                }
-            });
-        } else {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                showAlert(@"提示", @"需要Root权限才能安装，请确保已通过其他方式获取root权限");
-            });
+        // 验证文件
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (![fm fileExistsAtPath:tarPath]) {
+            showAlert(@"错误", @"选择的文件不存在");
+            return;
         }
-    });
+        
+        // 检查文件大小（至少 1MB）
+        NSDictionary *attrs = [fm attributesOfItemAtPath:tarPath error:nil];
+        unsigned long long size = [attrs fileSize];
+        if (size < 1024 * 1024) {
+            showAlert(@"错误", @"文件太小，可能不是有效的 TrollStore.tar");
+            return;
+        }
+        
+        // 复制到 /tmp 目录（确保有权限访问）
+        NSString *destPath = @"/tmp/TrollStore.tar";
+        NSError *error = nil;
+        [fm removeItemAtPath:destPath error:nil]; // 删除旧文件
+        [fm copyItemAtPath:tarPath toPath:destPath error:&error];
+        
+        if (error) {
+            showAlert(@"错误", [NSString stringWithFormat:@"无法复制文件: %@", error.localizedDescription]);
+            return;
+        }
+        
+        // 执行安装
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            NSString *helper = rootHelperPath();
+            if (helper) {
+                int ret = spawnRoot(helper, @[@"install-trollstore", destPath], nil, nil);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (ret == 0) {
+                        showAlert(@"成功", @"TrollStore 已安装，请重启设备");
+                    } else {
+                        showAlert(@"错误", [NSString stringWithFormat:@"安装失败，错误码: %d\n\n请确保:\n1. 文件未损坏\n2. 有 root 权限\n3. 系统版本兼容", ret]);
+                    }
+                });
+            } else {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    showAlert(@"错误", @"未找到 trollstorehelper\n请确保已通过其他方式安装 TrollStore 辅助工具");
+                });
+            }
+        });
+    }];
+}
+
+// 更新 TrollStore - 同样使用文件选择
+- (void)updateTrollStorePressed {
+    [self installTrollStorePressed];
 }
 
 - (void)uninstallTrollStorePressed {
     UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"确认卸载"
-        message:@"这将卸载TrollStore及其所有安装的应用，是否继续？"
+        message:@"这将卸载 TrollStore 及其所有安装的应用，是否继续？"
         preferredStyle:UIAlertControllerStyleAlert];
     
     [confirm addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
@@ -427,7 +451,7 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
             }
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (ret == 0) {
-                    showAlert(@"成功", @"TrollStore已卸载");
+                    showAlert(@"成功", @"TrollStore 已卸载");
                 } else {
                     showAlert(@"错误", [NSString stringWithFormat:@"卸载失败，错误码: %d", ret]);
                 }
@@ -446,7 +470,7 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
         if (helper) {
             ret = spawnRoot(helper, @[@"refresh-apps"], nil, nil);
         } else {
-            // 使用posix_spawn替代system
+            // 使用 posix_spawn 替代 system
             ret = run_shell_command("uicache -a 2>/dev/null; ldrestart 2>/dev/null");
         }
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -459,22 +483,50 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
     });
 }
 
+// 注册持久化助手 - 改为文件选择
 - (void)registerPersistenceHelperPressed {
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        NSString *helper = rootHelperPath();
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        int ret = -1;
-        if (helper) {
-            ret = spawnRoot(helper, @[@"register-user-persistence-helper", bundleID], nil, nil);
+    [self showFilePickerForType:@"tipa"
+        message:@"请选择 PersistenceHelper_Embedded.tipa 文件\n\n这是 TrollStore 的持久化助手安装包"
+        completion:^(NSString *tipaPath) {
+        if (!tipaPath) {
+            showAlert(@"取消", @"未选择文件");
+            return;
         }
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (ret == 0) {
-                showAlert(@"成功", @"已注册为TrollStore持久化助手");
-            } else {
-                showAlert(@"错误", @"注册失败，请确保有root权限");
+        
+        // 复制到 /tmp
+        NSString *destPath = @"/tmp/PersistenceHelper_Embedded.tipa";
+        NSFileManager *fm = [NSFileManager defaultManager];
+        [fm removeItemAtPath:destPath error:nil];
+        
+        NSError *error = nil;
+        [fm copyItemAtPath:tipaPath toPath:destPath error:&error];
+        
+        if (error) {
+            showAlert(@"错误", [NSString stringWithFormat:@"复制失败: %@", error.localizedDescription]);
+            return;
+        }
+        
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            NSString *helper = rootHelperPath();
+            NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+            int ret = -1;
+            if (helper) {
+                // 先安装 tipa 到 Tips 应用
+                ret = spawnRoot(helper, @[@"install-tipa", destPath], nil, nil);
+                if (ret == 0) {
+                    // 然后注册为持久化助手
+                    ret = spawnRoot(helper, @[@"register-user-persistence-helper", bundleID], nil, nil);
+                }
             }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (ret == 0) {
+                    showAlert(@"成功", @"已注册为 TrollStore 持久化助手\n\n请确保 Tips 应用未被删除");
+                } else {
+                    showAlert(@"错误", [NSString stringWithFormat:@"注册失败，错误码: %d\n\n请检查:\n1. 文件是否正确\n2. 是否有 root 权限\n3. Tips 应用是否存在", ret]);
+                }
+            });
         });
-    });
+    }];
 }
 
 - (void)unregisterPersistenceHelperPressed {
@@ -494,15 +546,11 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
     });
 }
 
-- (void)updateTrollStorePressed:(NSString *)newVersion {
-    [self installTrollStorePressed];
-}
-
 #pragma mark - Main Menu
 
 - (void)showInjectedAlert {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Coruna + TrollStore"
-        message:@"已向SpringBoard注入插件，在主屏幕长按左上角显示菜单喵~\no(=•ω＜=)ρ⌒☆\n\nTrollStore状态: 检测中..."
+        message:@"已向 SpringBoard 注入插件，在主屏幕长按左上角显示菜单喵~\no(=•ω＜=)ρ⌒☆\n\nTrollStore 状态: 检测中..."
         preferredStyle:UIAlertControllerStyleAlert];
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
@@ -515,7 +563,7 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
         }
         
         dispatch_async(dispatch_get_main_queue(), ^{
-            alert.message = [NSString stringWithFormat:@"已向SpringBoard注入插件，在主屏幕长按左上角显示菜单喵~\no(=•ω＜=)ρ⌒☆\n\nTrollStore状态: %@", statusMsg];
+            alert.message = [NSString stringWithFormat:@"已向 SpringBoard 注入插件，在主屏幕长按左上角显示菜单喵~\no(=•ω＜=)ρ⌒☆\n\nTrollStore 状态: %@", statusMsg];
         });
     });
 
@@ -527,22 +575,7 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
     } else {
         [alert addAction:[UIAlertAction actionWithTitle:@"🔄 更新 TrollStore"
             style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            fetchLatestTrollStoreVersion(^(NSString *latestVersion) {
-                NSString *currentVersion = getTrollStoreVersion();
-                if (latestVersion && [currentVersion compare:latestVersion options:NSNumericSearch] == NSOrderedAscending) {
-                    UIAlertController *updateConfirm = [UIAlertController alertControllerWithTitle:@"发现新版本"
-                        message:[NSString stringWithFormat:@"当前: %@\n最新: %@\n是否更新？", currentVersion, latestVersion]
-                        preferredStyle:UIAlertControllerStyleAlert];
-                    [updateConfirm addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-                    [updateConfirm addAction:[UIAlertAction actionWithTitle:@"更新" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                        [self updateTrollStorePressed:latestVersion];
-                    }]];
-                    UIWindow *keyWindow = getKeyWindow();
-                    [keyWindow.rootViewController presentViewController:updateConfirm animated:YES completion:nil];
-                } else {
-                    showAlert(@"提示", @"当前已是最新版本");
-                }
-            });
+            [self updateTrollStorePressed];
         }]];
         
         [alert addAction:[UIAlertAction actionWithTitle:@"❌ 卸载 TrollStore"
@@ -585,10 +618,10 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
 
     [alert addAction:[UIAlertAction actionWithTitle:@"🔦 通过行动按键开启闪光灯"
         style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        showAlert(@"Action Button", @"单击: 开关闪光灯\n双击: Magic ✨\n长按: 触发原有的功能\n\n仅支持iPhone 15 Pro+(iOS 17)");
+        showAlert(@"Action Button", @"单击: 开关闪光灯\n双击: Magic ✨\n长按: 触发原有的功能\n\n仅支持 iPhone 15 Pro+ (iOS 17)");
     }]];
 
-    [alert addAction:[UIAlertAction actionWithTitle:@"📦 加载.dylib插件"
+    [alert addAction:[UIAlertAction actionWithTitle:@"📦 加载 .dylib 插件"
         style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         UIDocumentPickerViewController *documentPickerVC = [[UIDocumentPickerViewController alloc]
                 initForOpeningContentTypes:@[[UTType typeWithFilenameExtension:@"dylib" conformingToType:UTTypeData]]
@@ -599,14 +632,14 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
         [keyWindow.rootViewController presentViewController:documentPickerVC animated:YES completion:nil];
     }]];
 
-    [alert addAction:[UIAlertAction actionWithTitle:@"🐛 激活FLEX调试"
+    [alert addAction:[UIAlertAction actionWithTitle:@"🐛 激活 FLEX 调试"
         style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         Class flexManagerClass = NSClassFromString(@"FLEXManager");
         if (flexManagerClass) {
             id sharedManager = [flexManagerClass valueForKey:@"sharedManager"];
             [sharedManager performSelector:@selector(showExplorer)];
         } else {
-            showAlert(@"Error", @"未找到FLEXManager, 请先加载libFLEX.dylib");
+            showAlert(@"Error", @"未找到 FLEXManager, 请先加载 libFLEX.dylib");
         }
     }]];
 
@@ -645,10 +678,10 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
         }
         
         NSString *logPath = @"/tmp/tips_search_log.txt";
-        [logContent writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [logContent writeToFile:logPath atomically:YES encoding:NSUTF8Encoding error:nil];
         
         dispatch_async(dispatch_get_main_queue(), ^{
-            UIAlertController *result = [UIAlertController alertControllerWithTitle:@"Tips搜索完成"
+            UIAlertController *result = [UIAlertController alertControllerWithTitle:@"Tips 搜索完成"
                 message:[logContent substringToIndex:MIN(500, logContent.length)]
                 preferredStyle:UIAlertControllerStyleAlert];
             [result addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
@@ -707,7 +740,7 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
 
     [settings addAction:[UIAlertAction actionWithTitle:@"恢复默认" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         g_timeFormat = nil;
-        g_dateFormat = nil;  // 修复：原拼写错误 g_dateDateFormat
+        g_dateFormat = nil;
         initStatusBarTweak();
         showAlert(@"Reset", @"已恢复默认 (HH:mm / E dd/MM/yyyy).\n锁屏并重新解锁让更改生效");
     }]];
@@ -718,12 +751,59 @@ static void fetchLatestTrollStoreVersion(void (^completion)(NSString *)) {
     [keyWindow.rootViewController presentViewController:settings animated:YES completion:nil];
 }
 
+// 文档选择器回调 - 处理 TrollStore 安装文件
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    if (urls.count == 0) return;
+    
+    NSURL *url = urls.firstObject;
+    NSString *path = url.path;
+    
+    // 获取关联的回调
+    void (^completion)(NSString *) = objc_getAssociatedObject(controller, "completionBlock");
+    NSString *expectedExt = objc_getAssociatedObject(controller, "fileExtension");
+    
+    // 验证扩展名
+    if (expectedExt && ![path.pathExtension.lowercaseString isEqualToString:expectedExt.lowercaseString]) {
+        showAlert(@"错误", [NSString stringWithFormat:@"请选择 .%@ 文件", expectedExt]);
+        if (completion) completion(nil);
+        return;
+    }
+    
+    // 安全访问文件
+    [url startAccessingSecurityScopedResource];
+    NSString *tempPath = [NSTemporaryDirectory() stringByAppendingPathComponent:path.lastPathComponent];
+    
+    NSError *error = nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    
+    // 复制到临时目录
+    [fm removeItemAtPath:tempPath error:nil];
+    [fm copyItemAtPath:path toPath:tempPath error:&error];
+    [url stopAccessingSecurityScopedResource];
+    
+    if (error) {
+        showAlert(@"错误", [NSString stringWithFormat:@"无法访问文件: %@", error.localizedDescription]);
+        if (completion) completion(nil);
+        return;
+    }
+    
+    if (completion) {
+        completion(tempPath);
+    }
+}
+
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
+    void (^completion)(NSString *) = objc_getAssociatedObject(controller, "completionBlock");
+    if (completion) completion(nil);
+}
+
+// 原有的 dylib 加载回调
+- (void)loadDylibDocumentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     if (urls.count <= 0) return;
     NSString *log = @"";
     for (NSURL *url in urls) {
         NSString *path = url.path;
-        log = [log stringByAppendingFormat:@"加载%@:", path.lastPathComponent];
+        log = [log stringByAppendingFormat:@"加载 %@:", path.lastPathComponent];
         void *handle = dlopen(path.UTF8String, RTLD_NOW);
         if (handle) {
             log = [log stringByAppendingString:@"成功\n"];
@@ -926,329 +1006,32 @@ __attribute__((constructor)) static void init() {
     initActionButtonTweak();
     initDockTransparency();
     initHideIconLabels();
-    
-    // 延迟初始化，等待 SpringBoard 完全启动
+    [SpringBoard.sharedApplication initStatusBarGesture];
+
+    // 移除自动下载 PersistenceHelper 的逻辑，改为首次启动提示
     dispatch_async(dispatch_get_main_queue(), ^{
-        // 再延迟2秒，确保 UI 完全准备好
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [SpringBoard.sharedApplication initStatusBarGesture];
-            [self checkAndSetupPersistenceHelper];
-        });
+        NSString *flag = @"/tmp/.coruna_welcomed";
+        if (![[NSFileManager defaultManager] fileExistsAtPath:flag]) {
+            [@"" writeToFile:flag atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            UIAlertController *welcome = [UIAlertController alertControllerWithTitle:@"Welcome to Coruna + TrollStore"
+                message:@"Your device has been jailbroken!\n\n"
+                         "Features enabled:\n"
+                         "  • Custom status bar (time + date)\n"
+                         "  • Action button → Flashlight\n"
+                         "  • Transparent dock\n"
+                         "  • Hidden icon labels\n"
+                         "  • TrollStore Helper integrated (本地文件安装模式)\n\n"
+                         "Long-press the status bar for settings.\n\n"
+                         "⚠️ 注意: 安装 TrollStore 需要手动下载文件:\n"
+                         "1. TrollStore.tar - 主程序\n"
+                         "2. PersistenceHelper_Embedded.tipa - 持久化助手\n"
+                         "请从 GitHub (opa334/TrollStore) 下载到文件 App"
+                preferredStyle:UIAlertControllerStyleAlert];
+            [welcome addAction:[UIAlertAction actionWithTitle:@"Let's go!" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                [SpringBoard.sharedApplication showInjectedAlert];
+            }]];
+            UIWindow *keyWindow = getKeyWindow();
+            [keyWindow.rootViewController presentViewController:welcome animated:YES completion:nil];
+        }
     });
 }
-
-// 检查并设置 PersistenceHelper（延迟执行，避免启动时阻塞）
-+ (void)checkAndSetupPersistenceHelper {
-    NSString *helperPath = @"/tmp/PersistenceHelper_Embedded";
-    NSString *flag = @"/tmp/.coruna_welcomed";
-    BOOL helperExists = [[NSFileManager defaultManager] fileExistsAtPath:helperPath];
-    BOOL hasShownWelcome = [[NSFileManager defaultManager] fileExistsAtPath:flag];
-    
-    // 标记已显示欢迎界面
-    if (!hasShownWelcome) {
-        [@"" writeToFile:flag atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    }
-    
-    // 如果 PersistenceHelper 不存在，显示设置选项
-    if (!helperExists) {
-        [self showPersistenceHelperSetup];
-    } else if (!hasShownWelcome) {
-        // 首次启动且文件已存在，显示主欢迎界面
-        [self showMainWelcome];
-    }
-}
-
-// 显示 PersistenceHelper 设置选项
-+ (void)showPersistenceHelperSetup {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Coruna + TrollStore"
-        message:@"欢迎使用 Coruna！\n\n"
-              "TrollStore 功能需要 PersistenceHelper_Embedded 文件。\n"
-              "该文件可从 GitHub 下载：https://github.com/opa334/TrollStore/releases\n\n"
-              "请选择获取方式："
-        preferredStyle:UIAlertControllerStyleAlert];
-    
-    [alert addAction:[UIAlertAction actionWithTitle:@"📂 选择本地文件" 
-        style:UIAlertActionStyleDefault 
-        handler:^(UIAlertAction *action) {
-        [self selectPersistenceHelperFile];
-    }]];
-    
-    [alert addAction:[UIAlertAction actionWithTitle:@"⬇️ 尝试自动下载" 
-        style:UIAlertActionStyleDefault 
-        handler:^(UIAlertAction *action) {
-        [self downloadPersistenceHelperWithUI];
-    }]];
-    
-    [alert addAction:[UIAlertAction actionWithTitle:@"❓ 什么是这个？" 
-        style:UIAlertActionStyleDefault 
-        handler:^(UIAlertAction *action) {
-        [self showHelperInfo];
-    }]];
-    
-    [alert addAction:[UIAlertAction actionWithTitle:@"稍后再说" 
-        style:UIAlertActionStyleCancel 
-        handler:^(UIAlertAction *action) {
-        [self showMainWelcome];
-    }]];
-    
-    // 确保有有效的 rootViewController
-    UIViewController *rootVC = [self getValidRootViewController];
-    if (rootVC) {
-        [rootVC presentViewController:alert animated:YES completion:nil];
-    } else {
-        NSLog(@"[Coruna] Error: Cannot find valid root view controller");
-    }
-}
-
-// 获取有效的 rootViewController（带重试）
-+ (UIViewController *)getValidRootViewController {
-    UIWindow *keyWindow = getKeyWindow();
-    UIViewController *root = keyWindow.rootViewController;
-    
-    // 如果当前有 presentedViewController，使用它
-    while (root.presentedViewController) {
-        root = root.presentedViewController;
-    }
-    
-    return root;
-}
-
-// 带 UI 反馈的下载
-+ (void)downloadPersistenceHelperWithUI {
-    // 显示进度提示
-    UIAlertController *progressAlert = [UIAlertController alertControllerWithTitle:@"⬇️ 下载中..."
-        message:@"正在尝试从多个源下载...\n请稍候"
-        preferredStyle:UIAlertControllerStyleAlert];
-    
-    UIViewController *rootVC = [self getValidRootViewController];
-    [rootVC presentViewController:progressAlert animated:YES completion:nil];
-    
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        NSString *helperPath = @"/tmp/PersistenceHelper_Embedded";
-        
-        // 多个下载源（从旧到新尝试）
-        NSArray *urls = @[
-            @"https://github.com/opa334/TrollStore/releases/download/2.0.15/PersistenceHelper_Embedded",
-            @"https://github.com/opa334/TrollStore/releases/download/2.0.14/PersistenceHelper_Embedded",
-            @"https://github.com/opa334/TrollStore/releases/download/2.0.13/PersistenceHelper_Embedded",
-            @"https://github.com/opa334/TrollStore/releases/download/2.0.12/PersistenceHelper_Embedded",
-            @"https://github.com/opa334/TrollStore/releases/download/2.0.11/PersistenceHelper_Embedded",
-            @"https://github.com/opa334/TrollStore/releases/download/2.0.9/PersistenceHelper_Embedded",
-            @"https://github.com/opa334/TrollStore/releases/download/2.0.8/PersistenceHelper_Embedded",
-            @"https://github.com/opa334/TrollStore/releases/download/2.0.7/PersistenceHelper_Embedded",
-            @"https://github.com/opa334/TrollStore/releases/download/2.0.6/PersistenceHelper_Embedded",
-            @"https://github.com/opa334/TrollStore/releases/download/2.0.5/PersistenceHelper_Embedded",
-            @"https://github.com/opa334/TrollStore/releases/download/2.0.4/PersistenceHelper_Embedded",
-            @"https://github.com/opa334/TrollStore/releases/download/2.0.2/PersistenceHelper_Embedded",
-            @"https://github.com/opa334/TrollStore/releases/download/2.0.1/PersistenceHelper_Embedded",
-            @"https://github.com/opa334/TrollStore/releases/download/2.0/PersistenceHelper_Embedded"
-        ];
-        
-        __block BOOL downloaded = NO;
-        __block NSString *lastError = @"Unknown error";
-        
-        for (NSString *urlString in urls) {
-            NSLog(@"[Coruna] Trying: %@", urlString);
-            
-            // 更新进度（需要在主线程）
-            dispatch_async(dispatch_get_main_queue(), ^{
-                progressAlert.message = [NSString stringWithFormat:@"尝试: %@", 
-                    [[urlString lastPathComponent] stringByDeletingPathExtension]];
-            });
-            
-            NSData *data = downloadFile(urlString);
-            
-            if (data && data.length > 1000) { // 至少1KB，避免下载到错误页面
-                // 验证文件头
-                if (data.length > 4) {
-                    uint32_t magic = *(uint32_t *)data.bytes;
-                    // Mach-O 64位: 0xfeedfacf, 32位: 0xfeedface, FAT: 0xcafebabe
-                    if (magic == 0xfeedfacf || magic == 0xfeedface || 
-                        magic == 0xcafebabe || magic == 0xbebafeca) {
-                        
-                        if ([data writeToFile:helperPath atomically:YES]) {
-                            chmod(helperPath.UTF8String, 0755);
-                            downloaded = YES;
-                            NSLog(@"[Coruna] Success from: %@", urlString);
-                            break;
-                        }
-                    } else {
-                        lastError = [NSString stringWithFormat:@"Invalid file (magic: 0x%x)", magic];
-                    }
-                }
-            } else {
-                lastError = @"Download failed or file too small";
-            }
-        }
-        
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [progressAlert dismissViewControllerAnimated:YES completion:^{
-                if (downloaded) {
-                    UIAlertController *success = [UIAlertController alertControllerWithTitle:@"✅ 下载成功"
-                        message:@"PersistenceHelper 已安装，TrollStore 功能现在可用！"
-                        preferredStyle:UIAlertControllerStyleAlert];
-                    [success addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                        [self showMainWelcome];
-                    }]];
-                    UIViewController *root = [self getValidRootViewController];
-                    [root presentViewController:success animated:YES completion:nil];
-                } else {
-                    UIAlertController *fail = [UIAlertController alertControllerWithTitle:@"❌ 下载失败"
-                        message:[NSString stringWithFormat:@"%@\n\n请手动下载后选择本地文件", lastError]
-                        preferredStyle:UIAlertControllerStyleAlert];
-                    [fail addAction:[UIAlertAction actionWithTitle:@"选择文件" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                        [self selectPersistenceHelperFile];
-                    }]];
-                    [fail addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
-                        [self showMainWelcome];
-                    }]];
-                    UIViewController *root = [self getValidRootViewController];
-                    [root presentViewController:fail animated:YES completion:nil];
-                }
-            }];
-        });
-    });
-}
-
-// 显示说明信息
-+ (void)showHelperInfo {
-    UIAlertController *info = [UIAlertController alertControllerWithTitle:@"关于 PersistenceHelper"
-        message:@"PersistenceHelper 是 TrollStore 的辅助工具，用于：\n\n"
-              "• 在设备重启后重新注册 TrollStore 安装的应用\n"
-              "• 修复应用显示为\"不可用\"的问题\n"
-              "• 作为持久化助手维持 TrollStore 的功能\n\n"
-              "文件位置：/tmp/PersistenceHelper_Embedded\n"
-              "来源：https://github.com/opa334/TrollStore/releases"
-        preferredStyle:UIAlertControllerStyleAlert];
-    [info addAction:[UIAlertAction actionWithTitle:@"返回" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [self showPersistenceHelperSetup];
-    }]];
-    UIViewController *root = [self getValidRootViewController];
-    [root presentViewController:info animated:YES completion:nil];
-}
-
-// 选择本地文件
-+ (void)selectPersistenceHelperFile {
-    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc]
-        initForOpeningContentTypes:@[[UTType typeWithFilenameExtension:@"" conformingToType:UTTypeData],
-                                      [UTType typeWithFilenameExtension:@"embedded" conformingToType:UTTypeData]]
-        asCopy:YES];
-    picker.allowsMultipleSelection = NO;
-    picker.delegate = (id<UIDocumentPickerDelegate>)self;
-    picker.title = @"选择 PersistenceHelper_Embedded";
-    
-    UIViewController *root = [self getValidRootViewController];
-    [root presentViewController:picker animated:YES completion:nil];
-}
-
-// 文件选择回调
-+ (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
-    if (urls.count == 0) {
-        [self showMainWelcome];
-        return;
-    }
-    
-    NSURL *url = urls.firstObject;
-    NSString *selectedPath = url.path;
-    NSString *helperPath = @"/tmp/PersistenceHelper_Embedded";
-    
-    NSLog(@"[Coruna] Selected: %@", selectedPath);
-    
-    // 读取文件
-    NSData *data = [NSData dataWithContentsOfFile:selectedPath];
-    if (!data || data.length == 0) {
-        showAlert(@"❌ 错误", @"无法读取文件");
-        [self showPersistenceHelperSetup];
-        return;
-    }
-    
-    // 验证文件
-    BOOL isValid = NO;
-    if (data.length > 4) {
-        uint32_t magic = *(uint32_t *)data.bytes;
-        if (magic == 0xfeedfacf || magic == 0xfeedface || 
-            magic == 0xcafebabe || magic == 0xbebafeca) {
-            isValid = YES;
-        }
-    }
-    
-    // 检查文件名
-    NSString *fileName = selectedPath.lastPathComponent.lowercaseString;
-    if ([fileName containsString:@"persistence"] || [fileName containsString:@"helper"]) {
-        isValid = YES;
-    }
-    
-    if (!isValid) {
-        UIAlertController *warn = [UIAlertController alertControllerWithTitle:@"⚠️ 警告"
-            message:@"文件可能不是有效的 PersistenceHelper，是否仍要使用？"
-            preferredStyle:UIAlertControllerStyleAlert];
-        [warn addAction:[UIAlertAction actionWithTitle:@"重新选择" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
-            [self selectPersistenceHelperFile];
-        }]];
-        [warn addAction:[UIAlertAction actionWithTitle:@"仍要使用" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            [self installHelper:data];
-        }]];
-        UIViewController *root = [self getValidRootViewController];
-        [root presentViewController:warn animated:YES completion:nil];
-    } else {
-        [self installHelper:data];
-    }
-}
-
-+ (void)installHelper:(NSData *)data {
-    NSString *helperPath = @"/tmp/PersistenceHelper_Embedded";
-    
-    // 删除旧文件
-    [[NSFileManager defaultManager] removeItemAtPath:helperPath error:nil];
-    
-    // 写入新文件
-    if ([data writeToFile:helperPath atomically:YES]) {
-        chmod(helperPath.UTF8String, 0755);
-        
-        // 验证
-        NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:helperPath error:nil];
-        NSString *sizeStr = [NSByteCountFormatter stringFromByteCount:[attrs fileSize] 
-                                                           countStyle:NSByteCountFormatterCountStyleFile];
-        
-        UIAlertController *success = [UIAlertController alertControllerWithTitle:@"✅ 安装成功"
-            message:[NSString stringWithFormat:@"文件大小: %@\n路径: %@", sizeStr, helperPath]
-            preferredStyle:UIAlertControllerStyleAlert];
-        [success addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            [self showMainWelcome];
-        }]];
-        UIViewController *root = [self getValidRootViewController];
-        [root presentViewController:success animated:YES completion:nil];
-    } else {
-        showAlert(@"❌ 失败", @"无法写入文件");
-        [self showPersistenceHelperSetup];
-    }
-}
-
-+ (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
-    [self showMainWelcome];
-}
-
-// 主欢迎界面
-+ (void)showMainWelcome {
-    NSString *helperPath = @"/tmp/PersistenceHelper_Embedded";
-    BOOL helperExists = [[NSFileManager defaultManager] fileExistsAtPath:helperPath];
-    
-    NSString *extraMsg = helperExists ? @"" : @"\n\n⚠️ PersistenceHelper 未安装，TrollStore功能受限";
-    
-    UIAlertController *welcome = [UIAlertController alertControllerWithTitle:@"Welcome to Coruna"
-        message:[NSString stringWithFormat:@"设备已越狱！\n\n"
-                 "可用功能：\n"
-                 "  • 自定义状态栏（时间+日期）\n"
-                 "  • 操作按钮 → 手电筒\n"
-                 "  • 透明 Dock\n"
-                 "  • 隐藏图标标签\n"
-                 "  • TrollStore 助手%@\n\n"
-                 "长按状态栏打开菜单", extraMsg]
-        preferredStyle:UIAlertControllerStyleAlert];
-    [welcome addAction:[UIAlertAction actionWithTitle:@"开始使用" style:UIAlertActionStyleDefault handler:nil]];
-    
-    UIViewController *root = [self getValidRootViewController];
-    [root presentViewController:welcome animated:YES completion:nil];
-}
-
-@end
