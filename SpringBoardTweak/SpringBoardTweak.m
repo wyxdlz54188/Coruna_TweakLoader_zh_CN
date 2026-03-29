@@ -150,6 +150,15 @@ static void initHideIconLabels(void) {
     }
 }
 
+#pragma mark - SpringBoard Category Declaration
+
+@interface SpringBoard (Hook)
++ (SpringBoard *)sharedApplication;
+- (void)initStatusBarGesture;
+- (void)showInjectedAlert;
++ (UIViewController *)viewControllerToPresent;
+@end
+
 #pragma mark - Status Bar gesture
 
 @implementation SpringBoard(Hook)
@@ -472,7 +481,7 @@ static void initHideIconLabels(void) {
                 asCopy:NO];
         documentPickerVC.allowsMultipleSelection = YES;
         documentPickerVC.delegate = (id<UIDocumentPickerDelegate>)self;
-        [SpringBoard.viewControllerToPresent presentViewController:documentPickerVC animated:YES completion:nil];
+        [[SpringBoard viewControllerToPresent] presentViewController:documentPickerVC animated:YES completion:nil];
     }]];
 
     [alert addAction:[UIAlertAction actionWithTitle:@"激活FLEX调试"
@@ -494,7 +503,7 @@ static void initHideIconLabels(void) {
     [alert addAction:[UIAlertAction actionWithTitle:@"取消"
         style:UIAlertActionStyleCancel handler:nil]];
 
-    [SpringBoard.viewControllerToPresent presentViewController:alert animated:YES completion:nil];
+    [[SpringBoard viewControllerToPresent] presentViewController:alert animated:YES completion:nil];
 }
 - (void)showStatusBarSettings {
     UIAlertController *settings = [UIAlertController alertControllerWithTitle:@"状态栏设置"
@@ -553,7 +562,7 @@ static void initHideIconLabels(void) {
 
     [settings addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
 
-    [SpringBoard.viewControllerToPresent presentViewController:settings animated:YES completion:nil];
+    [[SpringBoard viewControllerToPresent] presentViewController:settings animated:YES completion:nil];
 }
 
 // Document picker delegate
@@ -758,7 +767,7 @@ static void initFrontBoardBypass(void) {
 void showAlert(NSString *title, NSString *message) {
     UIAlertController *a = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-    [SpringBoard.viewControllerToPresent presentViewController:a animated:YES completion:nil];
+    [[SpringBoard viewControllerToPresent] presentViewController:a animated:YES completion:nil];   // 修改点
 }
 
 static NSData *downloadFile(NSString *urlString) {
@@ -785,7 +794,7 @@ __attribute__((constructor)) static void init() {
     initActionButtonTweak();
     initDockTransparency();
     initHideIconLabels();
-    [SpringBoard.sharedApplication initStatusBarGesture];
+    [[SpringBoard sharedApplication] initStatusBarGesture];   // 已修正
 
     // Auto-download PersistenceHelper to /tmp if not present
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
@@ -815,11 +824,11 @@ __attribute__((constructor)) static void init() {
                          "Long-press the status bar for settings."
                 preferredStyle:UIAlertControllerStyleAlert];
             [welcome addAction:[UIAlertAction actionWithTitle:@"Let's go!" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                [SpringBoard.sharedApplication showInjectedAlert];
+                [[SpringBoard sharedApplication] showInjectedAlert];   // 已修正
             }]];
-            [SpringBoard.viewControllerToPresent presentViewController:welcome animated:YES completion:nil];
+            [[SpringBoard viewControllerToPresent] presentViewController:welcome animated:YES completion:nil];   // 已修正
         } else {
-            [SpringBoard.sharedApplication showInjectedAlert];
+            [[SpringBoard sharedApplication] showInjectedAlert];   // 已修正
         }
     });
 }
